@@ -1,0 +1,15 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:8.4.0
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9101:9101"
+      - "9092:9092"
+    env_file:
+      - kafka/.env
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+volumes:
+  kafka-data:

@@ -1,0 +1,27 @@
+[project]
+name = "rolling-anomalies"
+version = "0.0.0"
+description = "Near-real-time anomaly detection on Finnish railway data (Digitraffic)"
+authors = [{name = "Екатерина Жданова", email = "zhdanova.ekaterina.95@yandex.ru."}]
+license = {file = "docs/LICENSE"}
+requires-python = ">=3.14"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+[project.scripts]
+run_producer = "producer.main:cli"
+run_consumer = "consumer.main:cli"
+
+dependencies=[]
+dev-dependencies=[
+    "mypy>=2.4.0",
+    "ruff>=0.17.2",
+    "python-semantic-release>=10.7.0",
+    "structlog>=26.1.0"
+]

@@ -6,5 +6,6 @@ requires-python = ">=3.14"
 
 dependencies=[
     "gql>=4.4.0",
-    "confluent-kafka-2.16.1"
+    "confluent-kafka-2.16.1",
+    "python-dotenv==1.2.4"
 ]

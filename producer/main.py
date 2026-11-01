@@ -1,17 +1,20 @@
+import os
 import json
 from time import sleep
 
+import structlog
 from gql import Client, gql
 from gql.transport.aiohttp import AIOHTTPTransport
 from confluent_kafka import Producer
-import structlog
+from dotenv import load_dotenv
 
 from producer.queries import CURRENTLY_RUNNING_TRAINS
 
-DIGITRAFFIC_URL = "https://rata.digitraffic.fi/api/v2/graphql/graphql"
-
-
 logger = structlog.get_logger()
+load_dotenv("producer/.env")
+
+DIGITRAFFIC_URL = "https://rata.digitraffic.fi/api/v2/graphql/graphql"
+POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", 15))
 
 
 conf = {
@@ -32,7 +35,13 @@ def delivery_report(err, msg):
 
 
 def request():
-    transport = AIOHTTPTransport(url=DIGITRAFFIC_URL)
+    transport = AIOHTTPTransport(
+        url=DIGITRAFFIC_URL,
+        headers={
+            'Digitraffic-User': 'RailAnomaly/1.0',
+            'Accept-Encoding': 'gzip'
+        },
+    )
     client = Client(transport=transport)
 
     query = gql(CURRENTLY_RUNNING_TRAINS)
@@ -53,4 +62,4 @@ def request():
 if __name__ == "__main__":
     while True:
         request()
-        sleep(60)
+        sleep(POLLING_INTERVAL)

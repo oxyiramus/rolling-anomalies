@@ -3,7 +3,7 @@ name = "rolling-anomalies"
 version = "0.0.0"
 description = "Near-real-time anomaly detection on Finnish railway data (Digitraffic)"
 authors = [{name = "Екатерина Жданова", email = "zhdanova.ekaterina.95@yandex.ru."}]
-license = {file = "docs/LICENSE"}
+license = {file = "LICENSE"}
 requires-python = ">=3.14"
 classifiers = [
     "Development Status :: 3 - Alpha",

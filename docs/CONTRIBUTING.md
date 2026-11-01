@@ -13,7 +13,10 @@ echo "CLUSTER_ID=$(docker run --rm confluentinc/cp-kafka kafka-storage random-uu
 
 Создание топика:
 ```bash
-docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --topic my-topic --partitions 3 --replication-factor 1
+docker compose up -d
+docker compose exec kafka kafka-topics \
+    --bootstrap-server localhost:9092 \
+    --create --topic my-topic --partitions 3 --replication-factor 1
 ```
 
 Запуск контейнеров:

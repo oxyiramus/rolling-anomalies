@@ -16,7 +16,9 @@ logger = structlog.get_logger()
 
 conf = {
     'bootstrap.servers': 'localhost:9092',
-    'client.id': 'train-locations-producer'
+    'client.id': 'train-locations-producer',
+    'acks': 'all',
+    'enable.idempotence': True
 }
 
 producer = Producer(conf)

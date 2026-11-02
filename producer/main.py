@@ -1,90 +1,134 @@
-import os
-import json
+"""
+Producer to provide train locations data flow.
+"""
+
+
 import asyncio
+import json
+import os
 from time import monotonic
 
 import structlog
-from gql import Client, gql
-from gql.transport.aiohttp import AIOHTTPTransport
 from confluent_kafka.aio import AIOProducer
 from dotenv import load_dotenv
-
-from producer.queries import CURRENTLY_RUNNING_TRAINS
+from gql import Client, gql
+from gql.transport.aiohttp import AIOHTTPTransport
 
 logger = structlog.get_logger()
 load_dotenv("producer/.env")
 
-
-def delivery_report(err, msg):
-    if err is not None:
-        logger.error(f'Ошибка доставки: {err}')
-
-
-async def send_all(producer, msgs):
-    logger.debug("Begin send_all")
-
-    futures = []
-    for msg in msgs:
-        delivery_future = await producer.produce(
-            topic='train-locations',
-            key=f'key-{msg.get("trainNumber")}'.encode('utf-8'),
-            value=json.dumps(msg).encode('utf-8')
-        )
-        futures.append(delivery_future)
-
-    await producer.flush()
-    await asyncio.gather(*futures)
-
-
-async def request(session):
-    logger.debug("Begin request")
-
-    result = await session.execute(gql(CURRENTLY_RUNNING_TRAINS))
-    return result.get("currentlyRunningTrains")
-
-
-async def main():
-    POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", 15))
-    next_start = monotonic()
-
-    conf = {
-        'bootstrap.servers': 'localhost:9092',
-        'client.id': 'train-locations-producer',
-        'acks': 'all',
-        'enable.idempotence': True
+DIGITRAFFIC_URL = "https://rata.digitraffic.fi/api/v2/graphql/graphql"
+CURRENTLY_RUNNING_TRAINS = """
+    query {
+        currentlyRunningTrains {
+            trainNumber
+            departureDate
+            trainLocations(orderBy: {timestamp: DESCENDING}, take: 1) {
+                speed
+                timestamp
+                location
+            }
+        }
     }
+"""
+KAFKA_TOPIC = "train-locations"
 
-    producer = AIOProducer(conf)
+
+def create_producer() -> AIOProducer:
+    """
+    Creates and returns async Kafka producer instance.
+    """
+
+    return AIOProducer({
+        "bootstrap.servers": "localhost:9092",
+        "client.id": "train-locations-producer",
+        "acks": "all",
+        "enable.idempotence": True,
+    })
+
+
+async def create_graphql_session():
+    """
+    Creates and returns async GraphQL client and session.
+    """
 
     transport = AIOHTTPTransport(
-        url="https://rata.digitraffic.fi/api/v2/graphql/graphql",
+        url=DIGITRAFFIC_URL,
         headers={
-            'Digitraffic-User': 'RailAnomaly/1.0',
-            'Accept-Encoding': 'gzip'
+            "Digitraffic-User": "RailAnomaly/1.0",
+            "Accept-Encoding": "gzip",
         },
     )
     client = Client(transport=transport, execute_timeout=10)
     session = await client.connect_async(reconnecting=True)
+    return client, session
+
+
+async def send_all(producer: AIOProducer, msgs: list) -> None:
+    """
+    Sends message list through given producer to broker.
+    """
+
+    futures = [
+        await producer.produce(
+            topic=KAFKA_TOPIC,
+            key=f'key-{msg.get("trainNumber")}'.encode(),
+            value=json.dumps(msg).encode("utf-8"),
+        )
+        for msg in msgs
+    ]
+    await producer.flush()
+    results = await asyncio.gather(*futures, return_exceptions=True)
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error("Delivery error", error=str(result), msg_index=i)
+
+
+async def fetch_trains(session) -> list:
+    """
+    Fetches a batch of train locations data from Digitraffic api.
+    """
+    
+    result = await session.execute(gql(CURRENTLY_RUNNING_TRAINS))
+    return result.get("currentlyRunningTrains") or []
+
+
+async def run_loop(producer: AIOProducer, session, interval: float) -> None:
+    """
+    Manages event loop.
+    """
+
+    next_start = monotonic()
+
+    while True:
+        now = monotonic()
+        if next_start > now:
+            await asyncio.sleep(next_start - now)
+
+        next_start += interval
+
+        try:
+            batch = await fetch_trains(session)
+            await send_all(producer, batch)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Iteration error", error=str(e))
+
+        if monotonic() > next_start:
+            next_start = monotonic() + interval
+
+
+async def main():
+    """
+    Entrypoint.
+    """
+
+    interval = float(os.getenv("POLLING_INTERVAL", "15"))
+    producer = create_producer()
+    client, session = await create_graphql_session()
 
     try:
-        while True:
-
-            logger.debug("Begin iteration")
-            now = monotonic()
-            if next_start > now:
-                await asyncio.sleep(next_start - now)
-
-            next_start += POLLING_INTERVAL
-
-            try:
-                batch = await request(session)
-                await send_all(producer, batch)
-
-            except Exception as e:
-                logger.error(f'Ошибка запроса: {e}')
-
-            if monotonic() > next_start:
-                next_start = monotonic() + POLLING_INTERVAL
+        await run_loop(producer, session, interval)
 
     finally:
         await producer.close()

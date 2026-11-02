@@ -80,9 +80,14 @@ async def send_all(producer: AIOProducer, msgs: list) -> None:
     await producer.flush()
     results = await asyncio.gather(*futures, return_exceptions=True)
 
+    failed = sum(1 for r in results if isinstance(r, Exception))
+    sent = len(results) - failed
+
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             logger.error("Delivery error", error=str(result), msg_index=i)
+
+    return sent, failed
 
 
 async def fetch_trains(session) -> list:
@@ -108,11 +113,25 @@ async def run_loop(producer: AIOProducer, session, interval: float) -> None:
 
         next_start += interval
 
+        started = monotonic()
+        fetched, sent, failed = 0, 0, 0
+        error = None
+
         try:
             batch = await fetch_trains(session)
-            await send_all(producer, batch)
+            fetched = len(batch)
+            sent, failed = await send_all(producer, batch)
         except Exception as e:  # noqa: BLE001
-            logger.error("Iteration error", error=str(e))
+            error = str(e)
+
+        logger.info(
+            "Iteration finished",
+            fetched=fetched,
+            sent=sent,
+            failed=failed,
+            duration_ms=round((monotonic() - started) * 1000, 1),
+            error=error,
+        )
 
         if monotonic() > next_start:
             next_start = monotonic() + interval

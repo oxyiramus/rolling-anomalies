@@ -3,6 +3,8 @@
 Правка переменных окружения:
 ```bash
 cp kafka/.env.example kafka/.env
+cp producer/.env.example producer/.env
+cp clickhouse/.env.example clickhouse/.env
 ```
 При необходимости сконфигурируйте окружение, как вам нужно, через файл переменных.
 

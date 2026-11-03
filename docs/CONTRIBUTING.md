@@ -1,5 +1,11 @@
 ## Локальный запуск
 
+Копирование проекта:
+```bash
+git clone git@github.com:oxyiramus/rolling-anomalies.git
+cd rolling-anomalies
+```
+
 Правка переменных окружения:
 ```bash
 cp kafka/.env.example kafka/.env
@@ -13,15 +19,23 @@ cp clickhouse/.env.example clickhouse/.env
 echo "CLUSTER_ID=$(docker run --rm confluentinc/cp-kafka kafka-storage random-uuid)" >> kafka/.env
 ```
 
-Создание топика:
+Запуск контейнеров:
 ```bash
 docker compose up -d
+```
+
+Создание топиков:
+```bash
 docker compose exec kafka kafka-topics \
     --bootstrap-server localhost:9092 \
     --create --topic my-topic --partitions 3 --replication-factor 1
 ```
 
-Запуск контейнеров:
+Применение миграций ClickHouse:
 ```bash
-docker compose up -d
+docker run --rm \
+  --network rolling-anomalies_default \
+  --env-file clickhouse/.env \
+  -v "$(pwd)/clickhouse/migrations:/scripts" \
+  mikeamputer/ch-migrate:latest up
 ```

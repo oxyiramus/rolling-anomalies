@@ -40,7 +40,7 @@ def create_producer() -> AIOProducer:
     """
 
     return AIOProducer({
-        "bootstrap.servers": "localhost:9092",
+        "bootstrap.servers": "kafka:29092",
         "client.id": "train-locations-producer",
         "acks": "all",
         "enable.idempotence": True,

@@ -10,6 +10,12 @@ services:
       - kafka/.env
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092
+      start_period: 3s
+      interval: 5s
+      timeout: 5s
+      retries: 3
   
   clickhouse:
     user: "${UID}:${GID}"
@@ -28,6 +34,18 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+  
+  producer:
+    user: "${UID}:${GID}"
+    build:
+      dockerfile: producer/Dockerfile
+    image: oxyiramus/rolling-anomalies-producer:latest
+    container_name: producer
+    env_file:
+      - producer/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
 
 volumes:
   kafka-data:

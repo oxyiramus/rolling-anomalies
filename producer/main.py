@@ -23,6 +23,7 @@ CURRENTLY_RUNNING_TRAINS = """
         currentlyRunningTrains {
             trainNumber
             departureDate
+            version
             trainLocations(orderBy: {timestamp: DESCENDING}, take: 1) {
                 speed
                 timestamp

@@ -28,7 +28,7 @@ docker compose up -d
 ```bash
 docker compose exec kafka kafka-topics \
     --bootstrap-server localhost:9092 \
-    --create --topic my-topic --partitions 3 --replication-factor 1
+    --create --topic train-locations --partitions 3 --replication-factor 1
 ```
 
 Применение миграций ClickHouse:

@@ -4,89 +4,78 @@
 
 ## Описание
 
-Пайплайн обработки потоковых данных железнодорожных перевозок из открытого API Digitraffic (Финляндия) с детекцией аномалий в режиме, близком к реальному времени. Проект демонстрирует полный цикл: от сырых событий из внешнего API до моделированных витрин в ClickHouse и мониторинга в Grafana.
+Пайплайн обработки потоковых данных железнодорожных перевозок из открытого API Digitraffic (Финляндия) с детекцией аномалий в режиме, близком к реальному времени (near-real-time). Проект демонстрирует полный цикл: от сырых событий из внешнего API до моделированных витрин в ClickHouse и мониторинга.
 
 ## Источник данных
 
-**Digitraffic (железные дороги Финляндии)** — GraphQL/REST API с живыми данными о поездах: `trainNumber`, `departureDate`, `location`, `speed`, `timestamp`, а также расписания и отклонения от них. Real-time фид обновляется каждые **10 секунд**. Открытая лицензия Creative Commons, ключ не требуется.
+**Digitraffic (железные дороги Финляндии)** — GraphQL/REST API с живыми данными о поездах: `trainNumber`, `departureDate`, `location`, `speed`, `timestamp`, а также расписания и отклонения от них. Real-time фид обновляется каждые 10 секунд. Открытая лицензия Creative Commons, ключ не требуется.
 
 ## Архитектура
 
+Пайплайн построен по гибридной схеме (Stream + Micro-batch), чтобы избежать лишних перекладываний данных («спагетти») и обеспечить отказоустойчивость.
+
 ```
-Источник (Digitraffic API, polling каждые 15 сек)
-        ↓
-Python Producer
-        ↓
-Kafka topic: "transport_events"
-(partitions: 3, key: train_number)
-        ↓
-┌───────────────────┬───────────────────┬───────────────────┐
-↓                   ↓                   ↓                   ↓
-Consumer 1:        Consumer 2:        Consumer 3:        Consumer 4:
-dedup              windowing          anomaly            persistence
-(train_number,     (5-min agg)        detection          (ClickHouse)
- event_time)
-        ↓               ↓                 ↓                   ↓
-        └───────────────┴─────────────────┴───────────────────┘
-                                    ↓
-                    ClickHouse (MergeTree, партиции по дате)
-                                    ↓
-                    ┌───────────────┴───────────────┐
-                    ↓                               ↓
-                    Airflow (batch)           dbt (staging → marts)
-                    ├── dbt_run                     ↓
-                    ├── hourly_baselines       витрины в ClickHouse
-                    └── pipeline_health             ↓
-                            ↓                 ┌─────┴─────┐
-                            ↓                 ↓           ↓
-                            └─────────────→ Grafana    Metabase
-                                           (health)    (analytics)
+[API Digitraffic] ──(polling 15s)──> [Python Producer]
+│
+▼
+[Kafka] <──topic "train-locations"── (key: train_number)
+│
+├──> [ClickHouse Kafka Engine] ──> [MV] ──> raw_locations (ReplacingMergeTree)
+│
+└──> [ClickHouse Kafka Engine] ──> [MV] ──> raw_train_info
+
+(Далее — слой обогащения и аналитики)
+
+[raw_locations] ──> [Python Geo-Enricher (Airflow DAG, батч раз в минуту)]
+│ (R-tree матчинг к перегонам/станциям)
+▼
+[geo_enriched_locations] <── (JOIN) ──> [schedule_rows]
+│ (Airflow DAG синхронизации)
+│ ▼
+└──────────────> [dbt: staging → intermediate → marts]
+│
+▼
+[anomalies] (ClickHouse)
+│
+┌────────────┴────────────┐
+▼ ▼
+[Grafana] [Metabase]
+(health/alerts) (analytics)
 ```
 
-## Компоненты
+*Подробное описание потоков данных, обоснование выбора инструментов и обработка граничных случаев — в файле [ARCHITECTURE.md](ARCHITECTURE.md).*
 
-**Ingestion.** Python-продюсер опрашивает API GraphQL-запросом (`currentlyRunningTrains`), парсит `trainLocations` и пишет в Kafka с ключом `train_number` — все события одного поезда попадают в одну партицию, порядок сохраняется.
+## Ключевые компоненты
 
-**Дедупликация.** Digitraffic может возвращать дубли между циклами опроса. Консьюмер дедуплицирует по `(train_number, event_time)` или хешу payload перед записью в ClickHouse.
+**Ingestion.** Python-продюсер опрашивает GraphQL API (`currentlyRunningTrains`), парсит `trainLocations` и пишет в Kafka с ключом `train_number` (сохраняется порядок событий одного поезда).
 
-**Windowing (5-минутные агрегаты).** Консьюмер группирует события по `train_number` в скользящие окна, считает количество событий и среднюю скорость. Это основа для детекции аномалий.
+**Landing & Deduplication (ClickHouse).** Вместо Python-консьюмера используется нативный Kafka Engine в ClickHouse. Данные попадают в сырые таблицы (движок `ReplacingMergeTree`), который автоматически отсекает дубликаты по ключу.
 
-**Детекция аномалий.** Для Digitraffic: отклонение `speed` от расписания, «поезд стоит дольше baseline», опоздание > 5 минут.
+**Geo-Enrichment (Python + Airflow).** Отдельный батч-процесс (раз в минуту) забирает новые точки из `raw_locations`, использует локальный пространственный индекс (R-tree на базе OSM) для определения перегона и станции, и пишет результат в `geo_enriched_locations`.
 
-**Оркестрация (Airflow).** DAG `dbt_run` (каждые 15 мин: `dbt run` + `dbt test`), `hourly_baselines` (пересчёт baseline по маршрутам), `pipeline_health` (freshness, consumer lag, алерты). `SqlSensor` ждёт новые данные перед запуском dbt.
+**Schedule Sync (Airflow).** DAG обновляет расписание поездов (с проверкой версии), складывая его в нормализованную таблицу `schedule_rows`. JOIN с расписанием (ASOF JOIN по времени) выполняется в dbt на этапе трансформаций.
 
-**Хранение (ClickHouse).** Таблицы:
-- `transport_events` — сырые события, MergeTree, партиции по `toYYYYMMDD(event_time)`, `ORDER BY (train_number, event_time)`
-- `event_aggregates_5min` — оконные агрегаты
-- `anomalies` — детектированные аномалии с JSON-деталями
+**Windowing & Anomaly Detection (dbt + Airflow).** Расчёт baseline (медиана + MAD) вынесен в отдельный ночной DAG (`hourly_baselines`), так как это тяжелая операция. Детекция аномалий работает как микро-батч (раз в минуту) поверх дедуплицированных, обогащенных и связанных с расписанием данных.
 
-**Трансформации (dbt).** Staging (нормализация) → intermediate (траектории, baseline по маршрутам/времени) → marts (топ аномалий, карта отклонений, статистика по типам аномалий). Тесты: `not_null` на `train_number`, `unique` на `(train_number, event_time)`, `accepted_values` на тип аномалии.
-
-**Визуализация.** Grafana: freshness (лаг между `event_time` и временем записи в ClickHouse), throughput (событий/сек), consumer lag по партициям, количество активных аномалий. Metabase: топ аномальных поездов, распределение по часам, карта отклонений.
+**Визуализация.** Grafana: freshness, throughput, consumer lag, количество аномалий. Metabase: топ аномалий, распределение по часам и маршрутам.
 
 ## Что демонстрирует
 
-- **Python** — продюсер и консьюмеры: polling внешнего API, парсинг ответов, запись в Kafka, обработка окон и дедупликации, запись в ClickHouse. Асинхронность и обработка ошибок (retry, DLQ).
-- **GraphQL** — запросы к Digitraffic API (`currentlyRunningTrains`), работа с вложенной структурой ответа, пагинация и фильтрация на стороне API.
-- **Airflow** — DAG-архитектура, сенсоры (`SqlSensor` — ожидание новых данных), retry, XCom для передачи метаданных между тасками, оркестрация dbt и батч-агрегаций (baseline, health-check).
-- **Kafka** — партиционирование по ключу (`train_number`), consumer groups, идемпотентность (дедуп по `(train_number, event_time)`), мониторинг consumer lag.
-- **ClickHouse** — MergeTree, партиционирование по дате (`toYYYYMMDD(event_time)`), `ORDER BY` под запросы, агрегации по большим объёмам, вставка батчами.
-- **Дедупликация** — отсечение дублей между циклами polling по составному ключу или хешу payload; идемпотентная запись в ClickHouse.
-- **Windowing** — 5-минутные скользящие агрегаты по `train_number` (количество событий, средняя скорость), baseline для детекции аномалий.
-- **Детекция аномалий** — сравнение текущего окна с историческим baseline: отклонение скорости, простой дольше нормы, накопление задержки > 5 минут.
-- **SQL** — сложные запросы для оконных агрегатов и витрин: CTE, `GROUP BY`, оконные функции, джойны траекторий с baseline.
-- **dbt** — staging → intermediate → marts, инкрементальные модели (`is_incremental()`), 20+ data-тестов (`not_null`, `unique`, `accepted_values`), документация и lineage.
-- **Observability** — freshness (лаг между `event_time` и записью в ClickHouse), throughput (событий/сек), consumer lag по партициям, anomaly rate, алерты при отклонениях.
-- **Docker Compose** — 7 сервисов (Kafka, ClickHouse, producer, consumers, Airflow, Grafana, Metabase), healthchecks, volumes, сеть, секреты через env.
-- **Grafana** — дашборды здоровья пайплайна: freshness, throughput, consumer lag, количество активных аномалий, алерты.
-- **Metabase** — бизнес-витрины: топ аномальных поездов, распределение по часам, карта отклонений, динамика задержек.
+- **Python** — продюсер (polling API), фоновый обогатитель (R-tree матчинг).
+- **GraphQL** — работа с вложенной структурой ответа API.
+- **Kafka** — партиционирование по ключу, топики как буфер между слоями.
+- **ClickHouse** — нативный Kafka Engine (Materialized Views), движок `ReplacingMergeTree`, отказ от `FINAL` на горячем пути, партиционирование по дате, `ASOF JOIN`.
+- **Airflow** — DAG-архитектура для батч-слоя (синхронизация расписания, пересчёт baseline, гео-обогащение).
+- **dbt** — staging → intermediate → marts, оконные функции, тесты, документация.
+- **Docker Compose** — сервисы (Kafka, ClickHouse, Producer, Airflow, Grafana, Metabase).
+- **Observability** — мониторинг задержек (freshness), consumer lag, health-check.
 
 ## Roadmap
 
-**Релиз 1 (MVP):** поток данных от источника до сырого хранилища. Продюсер, консьюмер, запись в ClickHouse. Проверка, что данные идут и сохраняются.
+**Релиз 1 (MVP):** Продюсер → Kafka → ClickHouse (Kafka Engine + MV) → сырая таблица. Проверка, что данные идут и сохраняются.
 
-**Релиз 2:** дедупликация событий, оконные агрегаты, первые dbt-модели (staging и intermediate). Подключение Airflow для оркестрации dbt-запусков.
+**Релиз 2:** Подключение гео-матчинга (Python) к сырым данным. Настройка dbt для базовых трансформаций.
 
-**Релиз 3:** детекция аномалий на основе baseline, витрины marts, дашборды в Grafana и Metabase. Расширение Airflow: пересчёт baseline, мониторинг здоровья пайплайна, ожидание новых данных перед запуском dbt.
+**Релиз 3:** DAG для синхронизации расписания, JOIN с расписанием в dbt. Расчёт baseline (DAG) и детекция аномалий.
 
-**Релиз 4:** README, CI/CD (линт + тесты dbt), финализация Docker Compose со всеми сервисами, включая Airflow.
+**Релиз 4:** Визуализация в Grafana/Metabase, CI/CD, финализация Docker Compose и документации.

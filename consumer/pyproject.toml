@@ -1,9 +1,0 @@
-[project]
-name = "consumer"
-version = "0.0.0"
-authors = [{name = "Екатерина Жданова", email = "zhdanova.ekaterina.95@yandex.ru."}]
-requires-python = ">=3.14"
-
-dependencies=[
-    "confluent-kafka-2.16.1"
-]

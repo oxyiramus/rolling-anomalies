@@ -16,7 +16,6 @@ classifiers = [
 
 [project.scripts]
 run_producer = "producer.main:cli"
-run_consumer = "consumer.main:cli"
 
 dependencies=[]
 dev-dependencies=[
